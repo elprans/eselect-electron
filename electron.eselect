@@ -1,0 +1,287 @@
+# Copyright 1999-2016 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+# $Id: $
+
+# Based on postgresql.eselect by Aaron W. Swenson
+
+inherit config multilib
+
+DESCRIPTION="Manage default Electron symlinks."
+MAINTAINER="elvis@magic.io"
+VERSION="1.0.0"
+
+# Global Data
+B_PATH="${EROOT%/}/usr"
+E_PATH="${EROOT%/}/etc/eselect/electron"
+
+active_slot() {
+	if [[ -r ${E_PATH}/active && -n ${E_PATH}/active ]] ; then
+		echo $( <"${E_PATH}"/active )
+	else
+		echo "(none)"
+	fi
+}
+
+lib_dir() {
+	local lib_list=$(list_libdirs)
+	if [[ ${lib_list} =~ .*lib64.* && \
+		-n $(ls -d ${B_PATH}/lib64/electron-*/lib64 2> /dev/null) ]] ; then
+		echo "lib64"
+	elif [[ ${lib_list} =~ .*lib32.* && \
+		-n $(ls -d ${B_PATH}/lib32/electron-*/lib32 2> /dev/null) ]] ; then
+		echo "lib32"
+	elif [[ ${lib_list} =~ .*libx32.* && \
+		-n $(ls -d ${B_PATH}/libx32/electron-*/libx32 2> /dev/null) ]] ; then
+		echo "libx32"
+	else
+		echo "lib"
+	fi
+}
+
+### Linker Function ###
+# Takes four arguments:
+#   - Full source path (e.g. /usr/lib/postgresql-9.0/lib)
+#   - Pattern to search for
+#   - Full target directory path (e.g. /usr/bin)
+#   - Suffix (Optional) (e.g 84 to make /usr/bin/psql84)
+linker() {
+	local source_dir=$1
+	local pattern=$2
+	local target_dir=$3
+	local suffix=$4
+	local link_source
+	local findings
+	local rel_source
+
+	# Prevent passed patterns from being globbed
+	# If this module is run in /usr, '-name lib*' ends up globbing 'lib*',
+	# passing to 'find' the pattern '-name lib lib32 lib64' and find interprets
+	# those as path arguments causing failure.
+	set -f
+	findings=$(find -L "${source_dir}" -maxdepth 1 -mindepth 1 ${pattern})
+	set +f
+
+	for link_source in ${findings} ; do
+		local link_target="${target_dir%/}/$(basename ${link_source})${suffix}"
+
+		# For good measure, remove target before creating the symlink
+		[[ -h ${link_target} ]] && rm -f "${link_target}"
+		[[ -e ${link_target} ]] && \
+			die -q "The target '${link_target}' still exists and could not be removed!"
+
+		# Create relative links so that they work both here and inside the new
+		# root if $ROOT is not "/".
+		rel_source=$(relative_name "${link_source}" "${target_dir}")
+		ln -s "${rel_source}" "${link_target}" || die -q "Unable to create link!"
+		echo "${link_target##${ROOT%/}/}" >> "${E_PATH}"/active.links${suffix}
+	done
+}
+
+### Unlinker Function ###
+# Takes one argument:
+#   - Full path to active links file (e.g. /etc/eselect/postgresql/active.links)
+unlinker() {
+	local active_link_file=$1
+	if [[ -r ${active_link_file} ]] ; then
+		local active_links=($(<"${active_link_file}"))
+		for (( i=0; $i < ${#active_links[@]}; i++ )) ; do
+			[[ -h "${ROOT%/}/${active_links[$i]}" ]] && \
+				rm -f "${ROOT%/}/${active_links[$i]}"
+			[[ -e "${ROOT%/}/${active_links[$i]}" ]] && \
+				die -q "The target '${active_links[$i]}' still exists and could not be removed!"
+		done
+
+		rm -f "${active_link_file}"
+	fi
+}
+
+### Get Slots Function ###
+# Find all available slots in the preferred lib_dir() and return them.
+get_slots() {
+	local slot
+	local found_slots
+
+	for slot in $(find "${B_PATH}/$(lib_dir)/" -maxdepth 1 -type d \
+		-regex '.*electron-[0-9][0-9]*\.[0-9][0-9]*' | \
+		sed -re 's#.*([0-9]+\.[0-9]+)$#\1#' | sort -n)
+	do
+		# Check that electron binary exists for this slot, otherwise we have
+		# a false positive.
+		[[ -x "${B_PATH}/$(lib_dir)/electron-${slot}/electron" ]] && \
+			found_slots+=( ${slot} )
+	done
+
+	echo ${found_slots[@]}
+}
+
+### List Action ###
+describe_list() {
+	echo "List available Electron slots."
+}
+
+do_list() {
+	write_list_start "Available Electron Slots"
+
+	if $(is_output_mode brief) ; then
+		echo $(get_slots)
+	else
+		local slot
+		for slot in $(get_slots) ; do
+			local electron_ebuilds=""
+
+			local src
+            for src in "${E_PATH}"/slots/${slot}/base ; do
+                [[ -r ${src} ]] && source "${src}"
+            done
+
+			case "${slot}" in
+				"$(active_slot)" ) write_kv_list_entry \
+					"$(highlight_marker ${slot})" ;;
+				*                ) write_kv_list_entry \
+					"${slot}" ;;
+			esac
+		done
+	fi
+}
+
+### Show Action ###
+describe_show() {
+	echo "Show which slot is currently active."
+}
+
+do_show() {
+	echo $(active_slot)
+}
+
+### Set Action ###
+describe_set() {
+	echo "Create symbolic links for Electron libraries and applications."
+}
+
+do_set() {
+	local SLOT=$1
+	if [[ ! -d ${B_PATH}/$(lib_dir)/electron-${SLOT} ]] ; then
+		die -q "Not a valid slot."
+	fi
+
+	echo "Setting electron-${SLOT} as the default Electron installation..."
+
+	# Remove the active links to start a fresh list
+	echo -ne "\tRemoving old links..."
+	unlinker ${E_PATH}/active.links
+	echo "done."
+
+	echo -ne "\tGenerating new links..."
+	# Sources and targets for header files
+	local sources=(
+		"${B_PATH}"/include/electron-${SLOT}
+	)
+	local targets=(
+		"${B_PATH}"/include/electron
+	)
+
+	# The linker function cannot accomadate this special purpose.
+	local rel_source
+	local i
+	for (( i=0; $i < ${#sources[@]}; i++ )) ; do
+		# Remove target before creating the symlink
+		[[ -h ${targets[$i]} ]] && rm -f "${targets[$i]}"
+
+		# Check if link_target still exists
+		[[ -e ${targets[$i]} ]] && \
+			die -q "The target '${targets[$i]}' exists and could not be removed!"
+
+		# Create relative links so that they work both here and inside the new
+		# root if $ROOT is not "/"
+		rel_source=$(relative_name "${sources[$i]}" "$(dirname "${targets[$i]}")")
+
+		ln -s "$rel_source" "${targets[$i]}" || die -q "Unable to create link!"
+		echo "${targets[$i]##${ROOT%/}/}" >> "${E_PATH}"/active.links
+	done
+
+	# Link binary to /usr/bin/
+	ln -s "electron-${SLOT}" "/usr/bin/electron"
+    echo "${B_PATH##${ROOT%/}/}/bin/electron" >> "${E_PATH}/active.links"
+
+	echo ${SLOT} > "${E_PATH}/active"
+	echo "done."
+	echo "Setting ${SLOT} as default was successful!"
+}
+
+### Unset Action ###
+describe_unset() {
+	echo "Remove symbolic links."
+}
+
+do_unset() {
+	local SLOT=$1
+	if [[ ${SLOT} = $(active_slot) ]] ; then
+		echo -n "Unsetting ${SLOT} as the default installation..."
+		unlinker "${E_PATH}/active.links"
+		rm -f "${E_PATH}/active"
+		echo "done."
+		echo "Setting a new slot as the default."
+		do_update
+	else
+		echo "Inactive slot selected. No work to do."
+	fi
+}
+
+### Reset Action ###
+describe_reset() {
+	echo "Recreate symbolic links for currently active slot."
+}
+
+do_reset() {
+	local SLOT=$(active_slot)
+	[[ ${SLOT} = "(none)" ]] && die -q "No active slot to reset."
+	do_unset ${SLOT}
+	do_set ${SLOT}
+}
+
+### Update Action ###
+describe_update() {
+	echo "Refreshes all symbolic links managed by this module"
+}
+
+do_update() {
+	local slot=$(active_slot)
+	local slots=($(get_slots))
+	local index=${#slots[@]}
+
+	# In case all slots have been unmerged
+	if [[ ${index} -eq 0 ]] ; then
+		write_warning_msg "No slots found!"
+		write_warning_msg "Removing files (Control-C to abort) in..."
+		local i=6
+		while [[ $[i--] -gt 0 ]] ; do
+			echo -n " $i"
+			sleep 1
+		done
+		local sym_links
+		for sym_links in "${E_PATH}"/active.links* ; do
+			unlinker "${sym_links}"
+		done
+		rm -f "${E_PATH}/active"
+		rm -f "${ENV_FILE}"
+		do_action env update &> /dev/null
+		echo "Done!"
+		return 0
+	fi
+
+	# Reset, otherwise set the highest slot available.
+	if [[ ${slots[@]} =~ ${slot} ]] ; then
+		do_set ${slot}
+	else
+		# best_version doesn't work here as pkg_postrm runs before the world
+		# file is updated, thereby returning a false positive.
+		do_set ${slots[$index-1]}
+	fi
+
+	echo -en "\nCleaning out old links before refreshing..."
+	local sym_links
+	for sym_links in "${E_PATH}"/active.links?* ; do
+		unlinker "${sym_links}"
+	done
+	echo "done."
+}
