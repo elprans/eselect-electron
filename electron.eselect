@@ -1,4 +1,4 @@
-# Copyright 1999-2016 Gentoo Foundation
+# Copyright 1999-2017 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 # $Id: $
 
@@ -6,17 +6,23 @@
 
 inherit config multilib
 
-DESCRIPTION="Manage default Electron symlinks."
+DESCRIPTION="Manage active Electron version."
 MAINTAINER="elvis@magic.io"
-VERSION="1.0.0"
+VERSION="2.0"
 
 # Global Data
-B_PATH="${EROOT%/}/usr"
-E_PATH="${EROOT%/}/etc/eselect/electron"
+USR_PATH="${EROOT%/}/usr"
+
+INCLUDE_TARGETS=(
+	"${USR_PATH}"/include/electron
+)
 
 active_slot() {
-	if [[ -r ${E_PATH}/active && -n ${E_PATH}/active ]] ; then
-		echo $( <"${E_PATH}"/active )
+    # ${USR_PATH}/include/electron is a symlink to the active
+    # slot.  See if it's there, then find out where it links to.
+	if [[ -h "${USR_PATH}/include/electron" ]] ; then
+		canonicalise "${USR_PATH}/include/electron" | \
+			sed -re 's#.*([1-9][0-9.]+)$#\1#'
 	else
 		echo "(none)"
 	fi
@@ -25,73 +31,16 @@ active_slot() {
 lib_dir() {
 	local lib_list=$(list_libdirs)
 	if [[ ${lib_list} =~ .*lib64.* && \
-		-n $(ls -d ${B_PATH}/lib64/electron-*/lib64 2> /dev/null) ]] ; then
+		-n $(ls -d ${USR_PATH}/lib64/postgresql-*/lib64 2> /dev/null) ]] ; then
 		echo "lib64"
 	elif [[ ${lib_list} =~ .*lib32.* && \
-		-n $(ls -d ${B_PATH}/lib32/electron-*/lib32 2> /dev/null) ]] ; then
+		-n $(ls -d ${USR_PATH}/lib32/postgresql-*/lib32 2> /dev/null) ]] ; then
 		echo "lib32"
 	elif [[ ${lib_list} =~ .*libx32.* && \
-		-n $(ls -d ${B_PATH}/libx32/electron-*/libx32 2> /dev/null) ]] ; then
+		-n $(ls -d ${USR_PATH}/libx32/postgresql-*/libx32 2> /dev/null) ]] ; then
 		echo "libx32"
 	else
 		echo "lib"
-	fi
-}
-
-### Linker Function ###
-# Takes four arguments:
-#   - Full source path (e.g. /usr/lib/postgresql-9.0/lib)
-#   - Pattern to search for
-#   - Full target directory path (e.g. /usr/bin)
-#   - Suffix (Optional) (e.g 84 to make /usr/bin/psql84)
-linker() {
-	local source_dir=$1
-	local pattern=$2
-	local target_dir=$3
-	local suffix=$4
-	local link_source
-	local findings
-	local rel_source
-
-	# Prevent passed patterns from being globbed
-	# If this module is run in /usr, '-name lib*' ends up globbing 'lib*',
-	# passing to 'find' the pattern '-name lib lib32 lib64' and find interprets
-	# those as path arguments causing failure.
-	set -f
-	findings=$(find -L "${source_dir}" -maxdepth 1 -mindepth 1 ${pattern})
-	set +f
-
-	for link_source in ${findings} ; do
-		local link_target="${target_dir%/}/$(basename ${link_source})${suffix}"
-
-		# For good measure, remove target before creating the symlink
-		[[ -h ${link_target} ]] && rm -f "${link_target}"
-		[[ -e ${link_target} ]] && \
-			die -q "The target '${link_target}' still exists and could not be removed!"
-
-		# Create relative links so that they work both here and inside the new
-		# root if $ROOT is not "/".
-		rel_source=$(relative_name "${link_source}" "${target_dir}")
-		ln -s "${rel_source}" "${link_target}" || die -q "Unable to create link!"
-		echo "${link_target##${ROOT%/}/}" >> "${E_PATH}"/active.links${suffix}
-	done
-}
-
-### Unlinker Function ###
-# Takes one argument:
-#   - Full path to active links file (e.g. /etc/eselect/postgresql/active.links)
-unlinker() {
-	local active_link_file=$1
-	if [[ -r ${active_link_file} ]] ; then
-		local active_links=($(<"${active_link_file}"))
-		for (( i=0; $i < ${#active_links[@]}; i++ )) ; do
-			[[ -h "${ROOT%/}/${active_links[$i]}" ]] && \
-				rm -f "${ROOT%/}/${active_links[$i]}"
-			[[ -e "${ROOT%/}/${active_links[$i]}" ]] && \
-				die -q "The target '${active_links[$i]}' still exists and could not be removed!"
-		done
-
-		rm -f "${active_link_file}"
 	fi
 }
 
@@ -101,13 +50,13 @@ get_slots() {
 	local slot
 	local found_slots
 
-	for slot in $(find "${B_PATH}/$(lib_dir)/" -maxdepth 1 -type d \
-		-regex '.*electron-[0-9][0-9]*\.[0-9][0-9]*' | \
-		sed -re 's#.*([0-9]+\.[0-9]+)$#\1#' | sort -n)
+	for slot in $(find "${USR_PATH}/$(lib_dir)/" \
+					   -mindepth 1 -maxdepth 1 -type d -name 'electron-*' | \
+						 sed -re 's#.*([1-9][0-9.]+)$#\1#' | sort -n)
 	do
 		# Check that electron binary exists for this slot, otherwise we have
 		# a false positive.
-		[[ -x "${B_PATH}/$(lib_dir)/electron-${slot}/electron" ]] && \
+		[[ -x "${USR_PATH}/$(lib_dir)/electron-${slot}/electron" ]] && \
 			found_slots+=( ${slot} )
 	done
 
@@ -125,22 +74,25 @@ do_list() {
 	if $(is_output_mode brief) ; then
 		echo $(get_slots)
 	else
+		local provider
 		local slot
+		local bindir
 		for slot in $(get_slots) ; do
-			local electron_ebuilds=""
+			bindir="${USR_PATH}/$(lib_dir)/electron-${slot}"
 
-			local src
-            for src in "${E_PATH}"/slots/${slot}/base ; do
-                [[ -r ${src} ]] && source "${src}"
-            done
+			provider=$("${bindir}"/electron --version | \
+					   sed 's/[^0-9]*\(.*\)/\1/')
 
 			case "${slot}" in
-				"$(active_slot)" ) write_kv_list_entry \
-					"$(highlight_marker ${slot})" ;;
-				*                ) write_kv_list_entry \
-					"${slot}" ;;
+				"$(active_slot)" )
+					write_kv_list_entry \
+						"$(highlight_marker ${slot})" "${provider}";;
+				* )
+					write_kv_list_entry "${slot}" "${provider}";;
 			esac
 		done
+
+		[[ -z "$(get_slots)" ]] && write_warning_msg "No slots available."
 	fi
 }
 
@@ -159,53 +111,44 @@ describe_set() {
 }
 
 do_set() {
-	local SLOT=$1
-	if [[ ! -d ${B_PATH}/$(lib_dir)/electron-${SLOT} ]] ; then
-		die -q "Not a valid slot."
+	local slot=$1
+
+	if [[ ! -d ${USR_PATH}/$(lib_dir)/electron-${slot} ]] ; then
+		die -q "Not a valid Electron slot."
 	fi
 
-	echo "Setting electron-${SLOT} as the default Electron installation..."
+	# If there's an active slot, unset that one first
+	local active_slot=$(active_slot)
+	if [[ "${active_slot}" != "(none)" ]] ; then
+		echo -ne "Unsetting electron-${active_slot} as the default... "
+		do_unset ${active_slot}
+		echo "done."
+	fi
 
-	# Remove the active links to start a fresh list
-	echo -ne "\tRemoving old links..."
-	unlinker ${E_PATH}/active.links
-	echo "done."
+	echo -ne "Setting electron-${slot} as the default Electron installation... "
 
-	echo -ne "\tGenerating new links..."
 	# Sources and targets for header files
-	local sources=(
-		"${B_PATH}"/include/electron-${SLOT}
-	)
-	local targets=(
-		"${B_PATH}"/include/electron
+	local include_sources=(
+		"${USR_PATH}"/include/electron-${slot}
 	)
 
-	# The linker function cannot accomadate this special purpose.
 	local rel_source
 	local i
-	for (( i=0; $i < ${#sources[@]}; i++ )) ; do
-		# Remove target before creating the symlink
-		[[ -h ${targets[$i]} ]] && rm -f "${targets[$i]}"
+	for (( i=0; $i < ${#include_sources[@]}; i++ )) ; do
+		[[ -e ${include_sources[$i]} ]] || continue
 
-		# Check if link_target still exists
-		[[ -e ${targets[$i]} ]] && \
-			die -q "The target '${targets[$i]}' exists and could not be removed!"
-
-		# Create relative links so that they work both here and inside the new
+		# Create relative links so that they work both here and inside a new
 		# root if $ROOT is not "/"
-		rel_source=$(relative_name "${sources[$i]}" "$(dirname "${targets[$i]}")")
+		rel_source=$(relative_name "${include_sources[$i]}" "$(dirname "${INCLUDE_TARGETS[$i]}")")
 
-		ln -s "$rel_source" "${targets[$i]}" || die -q "Unable to create link!"
-		echo "${targets[$i]##${ROOT%/}/}" >> "${E_PATH}"/active.links
+		ln -s "$rel_source" "${INCLUDE_TARGETS[$i]}" || \
+			die -q "Unable to create link! $rel_source -> ${INCLUDE_TARGETS[$i]}"
 	done
 
-	# Link binary to /usr/bin/
-	ln -s "electron-${SLOT}" "/usr/bin/electron"
-    echo "${B_PATH##${ROOT%/}/}/bin/electron" >> "${E_PATH}/active.links"
+	# Link binary in /usr/bin/
+	ln -s "electron-${slot}" "/usr/bin/electron"
 
-	echo ${SLOT} > "${E_PATH}/active"
-	echo "done."
-	echo "Setting ${SLOT} as default was successful!"
+	echo "success!"
 }
 
 ### Unset Action ###
@@ -214,29 +157,44 @@ describe_unset() {
 }
 
 do_unset() {
-	local SLOT=$1
-	if [[ ${SLOT} = $(active_slot) ]] ; then
-		echo -n "Unsetting ${SLOT} as the default installation..."
-		unlinker "${E_PATH}/active.links"
-		rm -f "${E_PATH}/active"
-		echo "done."
-		echo "Setting a new slot as the default."
-		do_update
-	else
-		echo "Inactive slot selected. No work to do."
+	local slot=$1
+	if [[ ${slot} != $(active_slot) ]] ; then
+		echo "Slot already inactive; no work to do."
+		return 0
 	fi
-}
 
-### Reset Action ###
-describe_reset() {
-	echo "Recreate symbolic links for currently active slot."
-}
+	# Start with some known locations that are, or will contain, symlinks.
+	local paths=(
+		"${INCLUDE_TARGETS[@]}"
+		"${USR_PATH}/bin"
+	)
 
-do_reset() {
-	local SLOT=$(active_slot)
-	[[ ${SLOT} = "(none)" ]] && die -q "No active slot to reset."
-	do_unset ${SLOT}
-	do_set ${SLOT}
+	local l
+	local path
+
+	for path in "${paths[@]}" ; do
+		# If path is a link that belongs to the slot in question, it can be
+		# removed without invoking find.
+		if [[ -h "${path}" && \
+					$(canonicalise "${path}") == *electron-${slot}* ]] ; then
+			rm "${path}" || write_warning_msg "Couldn't remove: ${path}"
+			continue
+		fi
+
+		# If path is a real directory, symlinks need to be found within it.
+		for l in $(find "${path}" -mindepth 1 -maxdepth 1 -type l) ; do
+			# Skip the slot specific links (e.g., electron-1.6) in /usr/bin
+			# as they're managed by their ebuilds.
+			[[ ${l} == ${USR_PATH}/bin/*${slot} ]] && continue
+
+			# Get the file path that the link is pointing to. If it has the
+			# string "electron-${slot}" somewhere in it, then it's a link that
+			# needs to be removed.
+			if [[ $(canonicalise "${l}") == *electron-${slot}* ]] ; then
+				rm "${l}" || write_warning_msg "Couldn't remove: ${l}"
+			fi
+		done
+	done
 }
 
 ### Update Action ###
@@ -245,43 +203,49 @@ describe_update() {
 }
 
 do_update() {
-	local slot=$(active_slot)
+	## ANTIQUITY CLEAN UP ##
+	#
+	# Older versions of this module generated state and environment files of
+	# some sort or another. They're useless now and are just a waste of space.
+
+	local etc_path="${EROOT%/}/etc/eselect/electron"
+	if [[ -d ${etc_path} ]] ; then
+		local f
+		for f in "${etc_path}"/active* ; do
+			if [[ -e "${f}" ]] ; then
+				rm "${f}" || write_warning_msg "Can't remove: '${f}'"
+			fi
+		done
+
+		local unused_files
+		unused_file=( $(find "${etc_path}" -type f -not -name '.keep*') )
+		if [[ -n "${unused_file[@]}" ]] ; then
+			write_warning_msg "You have unused files that should be removed:"
+			for f in ${unused_file[@]} ; do
+				write_warning_msg $f
+			done
+		else
+			echo "It should be safe for you to remove '${etc_path}'"
+		fi
+	fi
+	## End Antiquity Clean Up
+
+	local active_slot=$(active_slot)
 	local slots=($(get_slots))
-	local index=${#slots[@]}
 
-	# In case all slots have been unmerged
-	if [[ ${index} -eq 0 ]] ; then
-		write_warning_msg "No slots found!"
-		write_warning_msg "Removing files (Control-C to abort) in..."
-		local i=6
-		while [[ $[i--] -gt 0 ]] ; do
-			echo -n " $i"
-			sleep 1
-		done
-		local sym_links
-		for sym_links in "${E_PATH}"/active.links* ; do
-			unlinker "${sym_links}"
-		done
-		rm -f "${E_PATH}/active"
-		rm -f "${ENV_FILE}"
-		do_action env update &> /dev/null
-		echo "Done!"
-		return 0
-	fi
-
-	# Reset, otherwise set the highest slot available.
-	if [[ ${slots[@]} =~ ${slot} ]] ; then
-		do_set ${slot}
+	if [[ ${slots[@]} =~ ${active_slot} ]] ; then
+		# If active_slot is in the slots list, set it again as the installation
+		# may have changed.
+		do_set ${active_slot}
+	elif [[ ${#slots[@]} -ne 0 ]] ; then
+		# If $slots is not empty and active_slot is not in the list, set the
+		# highest slot available.
+		do_set ${slots[-1]}
+	elif [[ ${active_slot} != "(none)" ]] ; then
+		# If slots is empty, but active_slot still has a value, an unset must
+		# happen as the links are now pointing to nothing.
+		do_unset ${active_slot}
 	else
-		# best_version doesn't work here as pkg_postrm runs before the world
-		# file is updated, thereby returning a false positive.
-		do_set ${slots[$index-1]}
+		echo "Apparently, I have nothing to do."
 	fi
-
-	echo -en "\nCleaning out old links before refreshing..."
-	local sym_links
-	for sym_links in "${E_PATH}"/active.links?* ; do
-		unlinker "${sym_links}"
-	done
-	echo "done."
 }
