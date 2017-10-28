@@ -30,13 +30,13 @@ active_slot() {
 lib_dir() {
 	local lib_list=$(list_libdirs)
 	if [[ ${lib_list} =~ .*lib64.* && \
-		-n $(ls -d ${USR_PATH}/lib64/electron-* 2> /dev/null) ]] ; then
+		-n $(printf '%s\n' ${USR_PATH}/lib64/electron-*/) ]]; then
 		echo "lib64"
 	elif [[ ${lib_list} =~ .*lib32.* && \
-		-n $(ls -d ${USR_PATH}/lib32/electron-* 2> /dev/null) ]] ; then
+		-n $(printf '%s\n' ${USR_PATH}/lib32/electron-*/) ]]; then
 		echo "lib32"
 	elif [[ ${lib_list} =~ .*libx32.* && \
-		-n $(ls -d ${USR_PATH}/libx32/electron-* 2> /dev/null) ]] ; then
+		-n $(printf '%s\n' ${USR_PATH}/libx32/electron-*/) ]]; then
 		echo "libx32"
 	else
 		echo "lib"
