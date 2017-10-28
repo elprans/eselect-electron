@@ -46,20 +46,28 @@ lib_dir() {
 ### Get Slots Function ###
 # Find all available slots in the preferred lib_dir() and return them.
 get_slots() {
-	local slot
-	local found_slots
+	local slot tmp
+	local found_slots=()
 
-	for slot in $(find "${USR_PATH}/$(lib_dir)/" \
-					   -mindepth 1 -maxdepth 1 -type d -name 'electron-*' | \
-						 sed -re 's#.*([1-9][0-9.]+)$#\1#' | sort -n)
-	do
-		# Check that electron binary exists for this slot, otherwise we have
-		# a false positive.
-		[[ -x "${USR_PATH}/$(lib_dir)/electron-${slot}/electron" ]] && \
-			found_slots+=( ${slot} )
-	done
+	while read -d $'\0' -r slot; do
+		# Check that electron binary exists for this slot,
+		# otherwise we have a false positive.
+		tmp="${USR_PATH}/$(lib_dir)/electron-${slot}/electron"
+		if [[ -x "${tmp}" ]]; then
+			found_slots+=( "${slot}" )
+		fi
+	done < \
+		<(find "${USR_PATH}/$(lib_dir)/" \
+		-mindepth 1 \
+		-maxdepth 1 \
+		-type d \
+		-name 'electron-*' \
+		-print0 | \
+		sed -re 's#.*([1-9][0-9.]+)$#\1#' | \
+		sort -n
+	)
 
-	echo ${found_slots[@]}
+	echo "${found_slots[@]}"
 }
 
 ### List Action ###
