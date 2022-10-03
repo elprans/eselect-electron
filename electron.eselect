@@ -8,7 +8,7 @@ inherit config multilib
 
 DESCRIPTION="Manage active Electron version."
 MAINTAINER="elvis@magic.io"
-VERSION="2.1"
+VERSION="2.2"
 
 # Global Data
 USR_PATH="${EROOT%/}/usr"
@@ -22,7 +22,7 @@ active_slot() {
     # slot.  See if it's there, then find out where it links to.
 	if [[ -h "${USR_PATH}/include/electron" ]] ; then
 		canonicalise "${USR_PATH}/include/electron" | \
-			sed -re 's#.*([1-9][0-9.]+)$#\1#'
+			sed -re 's#.*-([1-9][0-9.]+)$#\1#'
 	else
 		echo "(none)"
 	fi
@@ -52,7 +52,7 @@ get_slots() {
 
 	for slot in $(find "${USR_PATH}/$(lib_dir)/" \
 					   -mindepth 1 -maxdepth 1 -type d -name 'electron-*' | \
-						 sed -re 's#.*([1-9][0-9.]+)$#\1#' | sort -n)
+						 sed -re 's#.*-([1-9][0-9.]+)$#\1#' | sort -n)
 	do
 		# Check that electron binary exists for this slot, otherwise we have
 		# a false positive.
